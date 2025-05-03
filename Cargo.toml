@@ -27,6 +27,8 @@ serde = { version = "1.0.219", features = ["derive"] }
 egui-file-dialog = { version = "0.9.0", features = ["image-meta"] }
 egui_extras = { version = "0.31.1", features = ["all_loaders"] }
 image = { version = "0.25", features = ["jpeg", "png"] }
+ndarray = "0.16.1"
+ndarray-rand = "0.15.0"
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -39,6 +41,7 @@ web-sys = "0.3.70"              # to access the DOM (to hide the loading text)
 
 [profile.release]
 opt-level = 2 # fast and small wasm
+lto = true
 
 # Optimize all dependencies even in debug builds:
 [profile.dev.package."*"]

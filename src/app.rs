@@ -1,15 +1,13 @@
-use std::{io::BufReader, num::Wrapping, path::Path, process::id, sync::Arc};
+use std::{path::Path, sync::Arc, u8};
 
 use egui::{
-    emath::OrderedFloat,
-    epaint::TextureManager,
-    load::{self, SizedTexture},
-    Color32, ColorImage, FontImage, Image, ImageData, ImageSource, Pos2, Rect, TextBuffer,
-    TextureFilter, TextureHandle, TextureId, TextureOptions, Ui, Vec2,
+    load::{self},
+    ColorImage, Image, Sense, TextureHandle, TextureOptions,
 };
 use egui_extras::install_image_loaders;
 use egui_file_dialog::FileDialog;
-use image::load;
+
+use crate::kmeans::segmentation;
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -18,17 +16,37 @@ pub struct ImageSegmentationApp {
     #[serde(skip)] // This how you opt-out of serialization of a field
     pub selected_image_path: String,
     #[serde(skip)]
-    pub selected_image: Arc<Image<'static>>,
+    pub selected_image: ColorImage,
     #[serde(skip)]
     pub file_dialog: FileDialog,
+    #[serde(skip)]
+    pub img_texture: TextureHandle,
+    #[serde(skip)]
+    pub seg_texture: TextureHandle,
+    #[serde(skip)]
+    pub segmentation_map: ColorImage,
+    #[serde(skip)]
+    pub segmentated: bool,
+    pub k: u8,
 }
 
 impl Default for ImageSegmentationApp {
     fn default() -> Self {
+        let ctx = egui::Context::default();
         Self {
             // Example stuff:
             selected_image_path: String::new(),
-            selected_image: Arc::new(Image::new(ImageSource::Uri(std::borrow::Cow::Borrowed("")))),
+            selected_image: ColorImage::example(),
+            img_texture: ctx.load_texture(
+                "Image".to_string(),
+                ColorImage::example(),
+                TextureOptions::NEAREST,
+            ),
+            seg_texture: ctx.load_texture(
+                "SegMap".to_string(),
+                ColorImage::example(),
+                TextureOptions::NEAREST,
+            ),
             file_dialog: FileDialog::new()
                 .title("Kép kiválasztása...")
                 .add_file_filter(
@@ -39,6 +57,9 @@ impl Default for ImageSegmentationApp {
                             || path.extension().unwrap_or_default() == "jpeg"
                     }),
                 ),
+            k: 8_u8,
+            segmentation_map: ColorImage::example(),
+            segmentated: false,
         }
     }
 }
@@ -67,28 +88,95 @@ impl eframe::App for ImageSegmentationApp {
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            if ui.button("Kép feltöltése...").clicked() {
-                self.file_dialog.pick_file();
-            }
+            ui.horizontal(|ui| {
+                if ui.button("Kép feltöltése...").clicked() {
+                    self.file_dialog.pick_file();
+                }
+                ui.label("Number of clusters (klaszterek száma): ");
+                ui.add(egui::widgets::Slider::new(&mut self.k, 1..=u8::MAX));
+                if ui.button("Segmentate image!").clicked() && !self.selected_image_path.is_empty()
+                {
+                    self.segmentated = true;
+                    self.seg_texture = ctx.load_texture(
+                        "SegMap",
+                        self.selected_image.clone(),
+                        TextureOptions::NEAREST,
+                    );
+                    self.seg_texture.set(
+                        segmentation(self.selected_image.clone(), self.k).clone(),
+                        TextureOptions::NEAREST,
+                    );
+                }
+            });
             if self.file_dialog.update(ctx).picked().is_some() {
-                self.selected_image_path = format!(
-                    "file://{}",
-                    self.file_dialog
+                self.selected_image_path = self
+                    .file_dialog
+                    .picked()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                self.selected_image = load_image_from_path(Path::new(
+                    &self
+                        .file_dialog
                         .picked()
                         .unwrap()
                         .to_str()
                         .unwrap()
-                        .to_string()
-                );
+                        .to_string(),
+                ))
+                .unwrap();
             }
             if !self.selected_image_path.is_empty() {
                 let img = Image::new(&self.selected_image_path).fit_to_original_size(1_f32);
                 egui::ScrollArea::both().show(ui, |ui| {
                     ui.centered_and_justified(|ui| {
-                        ui.image(img.source(ctx));
+                        self.img_texture = ctx.load_texture(
+                            "Image",
+                            self.selected_image.clone(),
+                            TextureOptions::NEAREST,
+                        );
+                        self.img_texture
+                            .set(self.selected_image.clone(), TextureOptions::NEAREST);
+                        let image_texture = load::SizedTexture::new(
+                            self.img_texture.id(),
+                            self.img_texture.size_vec2(),
+                        );
+                        if !self.segmentated {
+                            ui.add(
+                                Image::new(Image::source(
+                                    &Image::from_texture(image_texture),
+                                    ui.ctx(),
+                                ))
+                                .sense(Sense::click_and_drag()),
+                            );
+                        } else if self.segmentated {
+                            let segmap_texture = load::SizedTexture::new(
+                                self.seg_texture.id(),
+                                self.seg_texture.size_vec2(),
+                            );
+                            ui.add(
+                                Image::new(Image::source(
+                                    &Image::from_texture(segmap_texture),
+                                    ui.ctx(),
+                                ))
+                                .sense(Sense::click_and_drag()),
+                            );
+                        }
                     });
                 });
             }
         });
     }
+}
+
+fn load_image_from_path(path: &std::path::Path) -> Result<egui::ColorImage, image::ImageError> {
+    let image = image::io::Reader::open(path)?.decode()?;
+    let size = [image.width() as _, image.height() as _];
+    let image_buffer = image.to_rgba8();
+    let pixels = image_buffer.as_flat_samples();
+    Ok(egui::ColorImage::from_rgba_unmultiplied(
+        size,
+        pixels.as_slice(),
+    ))
 }
